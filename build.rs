@@ -3,8 +3,8 @@ use std::{
     error::Error,
     ffi::OsStr,
     fs::read_dir,
-    path::Path,
-    process::{Command, exit},
+    path::{Path, PathBuf},
+    process::{exit, Command},
     str,
 };
 
@@ -18,6 +18,110 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    // The cmake crate panic()s on failure, so we do too throughout
+    // build_qwerty_mlir()
+    let built_qwerty_mlir = build_qwerty_mlir();
+
+    run_bindgen(built_qwerty_mlir)
+}
+
+struct BuiltQwertyMlir {
+    include_dir: PathBuf,
+    lib_dir: PathBuf,
+    static_lib_names: Vec<String>,
+}
+
+fn build_qwerty_mlir() -> BuiltQwertyMlir {
+    let parent_dir = PathBuf::from("..");
+
+    println!(
+        "cargo::rerun-if-changed={}",
+        parent_dir.join("CMakeLists.txt").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
+        parent_dir.join("qwerty_mlir").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
+        parent_dir.join("qwerty_util").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
+        parent_dir.join("tweedledum").display()
+    );
+
+    let install_dir = cmake::Config::new(parent_dir).generator("Ninja").build();
+    let include_dir = install_dir.join("include");
+    let lib_dir = install_dir.join("lib");
+
+    // Check if include_dir is empty
+    if let None = read_dir(&include_dir).unwrap().next() {
+        panic!(
+            "{} is an empty directory. Expected it to contain qwerty_mlir header files",
+            include_dir.display()
+        );
+    }
+
+    let lib_names_starting_with = |prefix| {
+        let lib_paths: Vec<_> = read_dir(&lib_dir)
+            .unwrap()
+            .filter_map(|dirent| {
+                dirent
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .filter(|filename| filename.starts_with(prefix))
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        if lib_paths.is_empty() {
+            panic!(
+                "Could not find libraries starting with {} in directory {}",
+                prefix,
+                lib_dir.display()
+            );
+        }
+
+        lib_paths
+    };
+
+    // We have to be careful with the ordering of linker args here. We need to
+    // pass a topological ordering of this dependency graph:
+    //
+    //     libMLIRCAPIQwerty.a
+    //           |
+    //           V
+    //     libMLIRQwerty*.a
+    //           |
+    //           V
+    //       libqwutil.a ----> libtweedledum.a
+    //           |
+    //           |   libMLIRCAPIQCirc.a
+    //           |      |
+    //           V      V
+    //      libMLIRQCirc*.a
+    //
+    // We choose the following topological ordering:
+    // libMLIRCAPIQwerty.a, libMLIRQwerty*.a, libqwutil.a, libtweedledum.a,
+    // libMLIRCAPIQCirc.a, libMLIRQCirc*.a.
+
+    let mut static_lib_names = lib_names_starting_with("libMLIRCAPIQwerty");
+    static_lib_names.append(&mut lib_names_starting_with("libMLIRQwerty"));
+    static_lib_names.append(&mut lib_names_starting_with("libqwutil"));
+    static_lib_names.append(&mut lib_names_starting_with("libtweedledum"));
+    static_lib_names.append(&mut lib_names_starting_with("libMLIRCAPIQCirc"));
+    static_lib_names.append(&mut lib_names_starting_with("libMLIRQCirc"));
+
+    BuiltQwertyMlir {
+        include_dir,
+        lib_dir,
+        static_lib_names,
+    }
+}
+
+fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>> {
     let version = llvm_config("--version")?;
 
     if !version.starts_with(&format!("{LLVM_MAJOR_VERSION}.",)) {
@@ -28,6 +132,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!("cargo:rerun-if-changed=wrapper.h");
+
+    println!(
+        "cargo:rustc-link-search={}",
+        built_qwerty_mlir.lib_dir.display()
+    );
+    for qwerty_lib_name in built_qwerty_mlir.static_lib_names {
+        if let Some(name) = parse_archive_name(&qwerty_lib_name) {
+            println!("cargo:rustc-link-lib=static={name}");
+        }
+    }
+
     println!("cargo:rustc-link-search={}", llvm_config("--libdir")?);
 
     for entry in read_dir(llvm_config("--libdir")?)? {
@@ -78,7 +193,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     bindgen::builder()
         .header("wrapper.h")
-        .clang_arg(format!("-I{}", llvm_config("--includedir")?))
+        .clang_args(vec![
+            format!("-I{}", llvm_config("--includedir")?),
+            format!("-I{}", built_qwerty_mlir.include_dir.display()),
+        ])
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .unwrap()
