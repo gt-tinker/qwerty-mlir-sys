@@ -51,7 +51,7 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
         parent_dir.join("tweedledum").display()
     );
 
-    let install_dir = cmake::Config::new(parent_dir).generator("Ninja").build();
+    let install_dir = cmake::Config::new(parent_dir).generator("Ninja").define("DUMP_MLIR_DEPS", "ON").build();
     let include_dir = install_dir.join("include");
     let lib_dir = install_dir.join("lib");
 
@@ -154,8 +154,6 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
             }
         }
     }
-
-    println!("cargo:rustc-link-lib=MLIR");
 
     for name in llvm_config("--libnames")?.trim().split(' ') {
         if let Some(name) = parse_archive_name(name) {
