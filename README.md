@@ -1,19 +1,10 @@
-# mlir-sys
+# qwerty-mlir-sys
 
-[![GitHub Action](https://img.shields.io/github/actions/workflow/status/femtomc/mlir-sys/test.yaml?style=flat-square)](https://github.com/femtomc/mlir-sys/actions)
-[![Crate](https://img.shields.io/crates/v/mlir-sys.svg?style=flat-square)](https://crates.io/crates/mlir-sys)
-[![License](https://img.shields.io/github/license/femtomc/mlir-sys.svg?style=flat-square)](LICENSE)
+This is a fork of [`mlir-sys`][1] intended for use in the Qwerty compiler.
 
-Rust bindings to [the MLIR C API](https://mlir.llvm.org/docs/CAPI/).
+This repository is only intended to be built as a submodule inside [the parent
+repository][2]. The reason for using a submodule at all is to make rebasing
+against upstream `mlir-sys` easier.
 
-## Install
-
-```sh
-cargo add mlir-sys
-```
-
-This crate searches an `llvm-config` command on build and uses it to determine build configurations related to LLVM and MLIR. You can also use a `MLIR_SYS_190_PREFIX` environment variable to specify a custom directory of LLVM installation.
-
-## License
-
-[MIT](LICENSE)
+[1]: https://github.com/mlir-rs/mlir-sys/
+[2]: https://github.com/gt-tinker/qwerty-rust-ast/tree/wip/mlir
