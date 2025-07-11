@@ -1,10 +1,11 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     env,
     error::Error,
-    ffi::OsStr,
-    fs::read_dir,
+    fs::{File, read_dir},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{Command, exit},
     str,
 };
 
@@ -29,6 +30,7 @@ struct BuiltQwertyMlir {
     include_dir: PathBuf,
     lib_dir: PathBuf,
     static_lib_names: Vec<String>,
+    mlir_deps_graph: HashMap<String, Vec<String>>,
 }
 
 fn build_qwerty_mlir() -> BuiltQwertyMlir {
@@ -51,9 +53,13 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
         parent_dir.join("tweedledum").display()
     );
 
-    let install_dir = cmake::Config::new(parent_dir).generator("Ninja").define("DUMP_MLIR_DEPS", "ON").build();
+    let install_dir = cmake::Config::new(parent_dir)
+        .generator("Ninja")
+        .define("DUMP_MLIR_DEPS", "ON")
+        .build();
     let include_dir = install_dir.join("include");
     let lib_dir = install_dir.join("lib");
+    let mlir_deps_tsv_path = install_dir.join("lib").join("mlir-deps.tsv");
 
     // Check if include_dir is empty
     if let None = read_dir(&include_dir).unwrap().next() {
@@ -62,30 +68,6 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
             include_dir.display()
         );
     }
-
-    let lib_names_starting_with = |prefix| {
-        let lib_paths: Vec<_> = read_dir(&lib_dir)
-            .unwrap()
-            .filter_map(|dirent| {
-                dirent
-                    .unwrap()
-                    .file_name()
-                    .to_str()
-                    .filter(|filename| filename.starts_with(prefix))
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        if lib_paths.is_empty() {
-            panic!(
-                "Could not find libraries starting with {} in directory {}",
-                prefix,
-                lib_dir.display()
-            );
-        }
-
-        lib_paths
-    };
 
     // We have to be careful with the ordering of linker args here. We need to
     // pass a topological ordering of this dependency graph:
@@ -107,17 +89,31 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     // libMLIRCAPIQwerty.a, libMLIRQwerty*.a, libqwutil.a, libtweedledum.a,
     // libMLIRCAPIQCirc.a, libMLIRQCirc*.a.
 
-    let mut static_lib_names = lib_names_starting_with("libMLIRCAPIQwerty");
-    static_lib_names.append(&mut lib_names_starting_with("libMLIRQwerty"));
-    static_lib_names.append(&mut lib_names_starting_with("libqwutil"));
-    static_lib_names.append(&mut lib_names_starting_with("libtweedledum"));
-    static_lib_names.append(&mut lib_names_starting_with("libMLIRCAPIQCirc"));
-    static_lib_names.append(&mut lib_names_starting_with("libMLIRQCirc"));
+    let mut static_lib_names = lib_names_starting_with(&lib_dir, "libMLIRCAPIQwerty");
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQwerty"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libqwutil"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libtweedledum"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIQCirc"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQCirc"));
+
+    let mut mlir_deps_graph = HashMap::<String, Vec<String>>::new();
+    let mlir_deps_tsv_fp = File::open(mlir_deps_tsv_path).unwrap();
+    for mlir_deps_line_res in BufReader::new(mlir_deps_tsv_fp).lines() {
+        let mlir_deps_line = mlir_deps_line_res.unwrap();
+        let mut cols: Vec<String> = mlir_deps_line
+            .trim()
+            .split('\t')
+            .map(String::from)
+            .collect();
+        let depender = cols.remove(0);
+        mlir_deps_graph.insert(depender, cols);
+    }
 
     BuiltQwertyMlir {
         include_dir,
         lib_dir,
         static_lib_names,
+        mlir_deps_graph,
     }
 }
 
@@ -145,13 +141,13 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
 
     println!("cargo:rustc-link-search={}", llvm_config("--libdir")?);
 
-    for entry in read_dir(llvm_config("--libdir")?)? {
-        if let Some(name) = entry?.path().file_name().and_then(OsStr::to_str) {
-            if name.starts_with("libMLIR") {
-                if let Some(name) = parse_archive_name(name) {
-                    println!("cargo:rustc-link-lib=static={name}");
-                }
-            }
+    let mlir_lib_names: HashSet<_> = lib_names_starting_with(llvm_config("--libdir")?, "libMLIR")
+        .iter()
+        .filter_map(|s| parse_archive_name(s).map(str::to_string))
+        .collect();
+    for mlir_lib_name in toposort(&built_qwerty_mlir.mlir_deps_graph) {
+        if mlir_lib_names.contains(&mlir_lib_name) {
+            println!("cargo:rustc-link-lib=static={mlir_lib_name}");
         }
     }
 
@@ -203,6 +199,31 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+fn lib_names_starting_with<P: AsRef<Path>>(dir: P, prefix: &str) -> Vec<String> {
+    let dir_path = dir.as_ref();
+    let lib_paths: Vec<_> = read_dir(dir_path)
+        .unwrap()
+        .filter_map(|dirent| {
+            dirent
+                .unwrap()
+                .file_name()
+                .to_str()
+                .filter(|filename| filename.starts_with(prefix))
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    if lib_paths.is_empty() {
+        panic!(
+            "Could not find libraries starting with {} in directory {}",
+            prefix,
+            dir_path.display()
+        );
+    }
+
+    lib_paths
+}
+
 fn get_system_libcpp() -> Option<&'static str> {
     if cfg!(target_env = "msvc") {
         None
@@ -246,4 +267,40 @@ fn parse_archive_name(name: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn toposort(graph: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut sorted = Vec::new();
+    let mut vertex_indegrees: HashMap<String, usize> = HashMap::new();
+    let mut zero_indegree_queue = VecDeque::new();
+
+    for (depender, dependees) in graph {
+        vertex_indegrees.entry(depender.to_string()).or_insert(0);
+        for dependee in dependees {
+            vertex_indegrees
+                .entry(dependee.to_string())
+                .and_modify(|indegree| *indegree += 1)
+                .or_insert(1);
+        }
+    }
+
+    for (libname, indegree) in &vertex_indegrees {
+        if *indegree == 0 {
+            zero_indegree_queue.push_back(libname.to_string());
+        }
+    }
+
+    while let Some(ref libname) = zero_indegree_queue.pop_front() {
+        sorted.push(libname.to_string());
+
+        for dependee in &graph[libname] {
+            let indegree: &mut usize = vertex_indegrees.get_mut(dependee).unwrap();
+            *indegree -= 1;
+            if *indegree == 0 {
+                zero_indegree_queue.push_back(dependee.to_string());
+            }
+        }
+    }
+
+    sorted
 }
