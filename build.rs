@@ -96,6 +96,8 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIQCirc"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQCirc"));
 
+    // For an explanation of what mlir-deps.tsv is, see CMakeLists.txt in the
+    // parent repository.
     let mut mlir_deps_graph = HashMap::<String, Vec<String>>::new();
     let mlir_deps_tsv_fp = File::open(mlir_deps_tsv_path).unwrap();
     for mlir_deps_line_res in BufReader::new(mlir_deps_tsv_fp).lines() {
