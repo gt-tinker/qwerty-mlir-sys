@@ -93,6 +93,7 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQwerty"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libqwutil"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libtweedledum"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIUtils"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIQCirc"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQCirc"));
 

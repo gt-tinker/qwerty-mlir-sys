@@ -22,3 +22,4 @@
 
 #include <CAPI/QCirc.h>
 #include <CAPI/Qwerty.h>
+#include <CAPI/Utils.h>
