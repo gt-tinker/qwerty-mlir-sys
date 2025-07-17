@@ -23,12 +23,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     // build_qwerty_mlir()
     let built_qwerty_mlir = build_qwerty_mlir();
 
+    for rerun_if_changed_entry in built_qwerty_mlir.rerun_if_changed.iter() {
+        println!(
+            "cargo::rerun-if-changed={}",
+            rerun_if_changed_entry.display()
+        );
+    }
+
+    println!(
+        "cargo::metadata=bin_dir={}",
+        built_qwerty_mlir.bin_dir.display()
+    );
+
     run_bindgen(built_qwerty_mlir)
 }
 
 struct BuiltQwertyMlir {
+    rerun_if_changed: Vec<PathBuf>,
     include_dir: PathBuf,
     lib_dir: PathBuf,
+    bin_dir: PathBuf,
     static_lib_names: Vec<String>,
     mlir_deps_graph: HashMap<String, Vec<String>>,
 }
@@ -36,22 +50,12 @@ struct BuiltQwertyMlir {
 fn build_qwerty_mlir() -> BuiltQwertyMlir {
     let parent_dir = PathBuf::from("..");
 
-    println!(
-        "cargo::rerun-if-changed={}",
-        parent_dir.join("CMakeLists.txt").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        parent_dir.join("qwerty_mlir").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        parent_dir.join("qwerty_util").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        parent_dir.join("tweedledum").display()
-    );
+    let rerun_if_changed = vec![
+        parent_dir.join("CMakeLists.txt"),
+        parent_dir.join("qwerty_mlir"),
+        parent_dir.join("qwerty_util"),
+        parent_dir.join("tweedledum"),
+    ];
 
     let install_dir = cmake::Config::new(parent_dir)
         .generator("Ninja")
@@ -59,14 +63,21 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
         .build();
     let include_dir = install_dir.join("include");
     let lib_dir = install_dir.join("lib");
+    let bin_dir = install_dir.join("bin");
     let mlir_deps_tsv_path = install_dir.join("lib").join("mlir-deps.tsv");
 
     // Check if include_dir is empty
-    if let None = read_dir(&include_dir).unwrap().next() {
-        panic!(
-            "{} is an empty directory. Expected it to contain qwerty_mlir header files",
-            include_dir.display()
-        );
+    for (nonempty_dir, contents_summary) in [
+        (&include_dir, "header files"),
+        (&bin_dir, "debugging executables"),
+    ] {
+        if let None = read_dir(nonempty_dir).unwrap().next() {
+            panic!(
+                "{} is an empty directory. Expected it to contain qwerty_mlir {}",
+                include_dir.display(),
+                contents_summary
+            );
+        }
     }
 
     // We have to be careful with the ordering of linker args here. We need to
@@ -113,8 +124,10 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     }
 
     BuiltQwertyMlir {
+        rerun_if_changed,
         include_dir,
         lib_dir,
+        bin_dir,
         static_lib_names,
         mlir_deps_graph,
     }
