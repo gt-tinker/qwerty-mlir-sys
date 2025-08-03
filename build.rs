@@ -59,6 +59,9 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
 
     let install_dir = cmake::Config::new(parent_dir)
         .generator("Ninja")
+        // Hide a wall of warnings that are from LLVM, not us
+        // TODO: remove this so we don't miss useful warnings
+        .configure_arg("-Wno-dev")
         .define("DUMP_MLIR_DEPS", "ON")
         .build();
     let include_dir = install_dir.join("include");
