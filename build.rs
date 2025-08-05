@@ -110,6 +110,7 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIUtils"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIQCirc"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQCirc"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCCirc"));
 
     // For an explanation of what mlir-deps.tsv is, see CMakeLists.txt in the
     // parent repository.
