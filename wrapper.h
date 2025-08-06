@@ -20,6 +20,7 @@
 #include <mlir-c/Target/LLVMIR.h>
 #include <mlir-c/Transforms.h>
 
+#include <CAPI/CCirc.h>
 #include <CAPI/QCirc.h>
 #include <CAPI/Qwerty.h>
 #include <CAPI/Utils.h>
