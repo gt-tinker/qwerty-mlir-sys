@@ -98,26 +98,26 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
     //           V
     //     libMLIRQwerty*.a
     //           |
-    //           V
-    //       libqwutil.a ----> libtweedledum.a
-    //           |
     //           |   libMLIRCAPIQCirc.a
     //           |      |
     //           V      V
     //      libMLIRQCirc*.a
+    //           |
+    //           |   libMLIRCAPICCirc.a
+    //           |      |
+    //           V      V
+    //      libMLIRCCirc*.a
     //
     // We choose the following topological ordering:
-    // libMLIRCAPIQwerty.a, libMLIRQwerty*.a, libqwutil.a, libtweedledum.a,
-    // libMLIRCAPIQCirc.a, libMLIRQCirc*.a.
+    // libMLIRCAPIQwerty.a, libMLIRQwerty*.a, libMLIRCAPIQCirc.a,
+    // libMLIRQCirc*.a, libMLIRCAPICCirc.a, libMLIRCCirc*.a.
 
     let mut static_lib_names = lib_names_starting_with(&lib_dir, "libMLIRCAPIQwerty");
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQwerty"));
-    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libqwutil"));
-    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libtweedledum"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIUtils"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPIQCirc"));
-    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPICCirc"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRQCirc"));
+    static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCAPICCirc"));
     static_lib_names.append(&mut lib_names_starting_with(&lib_dir, "libMLIRCCirc"));
 
     // For an explanation of what mlir-deps.tsv is, see CMakeLists.txt in the
