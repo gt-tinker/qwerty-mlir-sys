@@ -24,6 +24,8 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-changed=build.rs");
+
     // The cmake crate panic()s on failure, so we do too throughout
     // build_qwerty_mlir()
     let built_qwerty_mlir = build_qwerty_mlir();
@@ -144,7 +146,6 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
 }
 
 fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=build.rs");
     let link_mode = detect_link_mode();
 
     if !cfg!(feature = "no-version-check") {
@@ -157,47 +158,26 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
         }
     }
 
-    let directory = llvm_config("--libdir", &link_mode)?;
-    println!("cargo:rustc-link-search={directory}");
-
     println!(
         "cargo:rustc-link-search={}",
         built_qwerty_mlir.lib_dir.display()
     );
     for qwerty_lib_name in built_qwerty_mlir.static_lib_names {
-        if let Some(name) = parse_archive_name(&qwerty_lib_name) {
+        if let Some(name) = parse_static_lib_name(&qwerty_lib_name) {
             println!("cargo:rustc-link-lib=static={name}");
         }
     }
 
-    println!("cargo:rustc-link-search={}", llvm_config("--libdir")?);
+    let directory = llvm_config("--libdir", &link_mode)?;
+    println!("cargo:rustc-link-search={directory}");
 
-    let mlir_lib_names: HashSet<_> = lib_names_starting_with(llvm_config("--libdir")?, "libMLIR")
+    let mlir_lib_names: HashSet<_> = lib_names_starting_with(llvm_config("--libdir", &link_mode)?, "libMLIR")
         .iter()
-        .filter_map(|s| parse_archive_name(s).map(str::to_string))
+        .filter_map(|s| parse_static_lib_name(s).map(str::to_string))
         .collect();
     for mlir_lib_name in toposort(&built_qwerty_mlir.mlir_deps_graph) {
         if mlir_lib_names.contains(&mlir_lib_name) {
             println!("cargo:rustc-link-lib=static={mlir_lib_name}");
-        }
-    }
-
-    match link_mode {
-        LinkMode::Static => {
-            for entry in fs::read_dir(&directory)? {
-                if let Some(name) = entry?.path().file_name().and_then(OsStr::to_str)
-                    && name.starts_with("libMLIR")
-                    && let Some(name) = parse_static_lib_name(name)
-                {
-                    println!("cargo:rustc-link-lib=static={name}");
-                }
-            }
-        }
-        LinkMode::Shared => {
-            // With shared LLVM, MLIR is a single shared library.
-            println!("cargo:rustc-link-lib=MLIR");
-            // The C API is in a separate shared library.
-            println!("cargo:rustc-link-lib=MLIR-C");
         }
     }
 
@@ -254,13 +234,14 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
     }
 
     let include_dir = llvm_config("--includedir", &link_mode)?;
-    let wrapper_contents = generate_wrapper_contents(&include_dir)?;
+    let qwerty_include_dir = built_qwerty_mlir.include_dir.display().to_string();
+    let wrapper_contents = generate_wrapper_contents(&include_dir, &qwerty_include_dir)?;
 
     bindgen::builder()
         .header_contents(WRAPPER_NAME, &wrapper_contents)
         .clang_args(vec![
             format!("-I{include_dir}"),
-            format!("-I{}", built_qwerty_mlir.include_dir.display()),
+            format!("-I{qwerty_include_dir}"),
         ])
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
@@ -451,7 +432,7 @@ fn parse_shared_lib_name(name: &str) -> Option<&str> {
 /// which interacts badly with bindgen's `CargoCallbacks::rerun-if-changed`
 /// tracking and forces cargo to rebuild this crate (and everything that
 /// depends on it) on every invocation.
-fn generate_wrapper_contents(include_dir: &str) -> Result<String, Box<dyn Error>> {
+fn generate_wrapper_contents(include_dir: &str, qwerty_include_dir: &str) -> Result<String, Box<dyn Error>> {
     let mlir_c_dir = Path::new(include_dir).join("mlir-c");
     let mut headers = Vec::new();
     collect_headers(&mlir_c_dir, &mlir_c_dir, &mut headers)?;
@@ -461,6 +442,14 @@ fn generate_wrapper_contents(include_dir: &str) -> Result<String, Box<dyn Error>
     for header in &headers {
         content.push_str(&format!("#include <mlir-c/{header}>\n"));
     }
+
+    headers.clear();
+    let qwerty_capi_dir = Path::new(qwerty_include_dir).join("CAPI");
+    collect_headers(&qwerty_capi_dir, &qwerty_capi_dir, &mut headers)?;
+    for header in &headers {
+        content.push_str(&format!("#include <CAPI/{header}>\n"));
+    }
+
     Ok(content)
 }
 

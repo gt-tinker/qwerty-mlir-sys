@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "qwerty-mlir-sys"
-version = "210.0.0"
+version = "220.0.2"
 dependencies = [
  "bindgen",
  "cmake",
