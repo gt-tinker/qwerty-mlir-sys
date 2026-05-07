@@ -1,8 +1,8 @@
 [package]
 name = "qwerty-mlir-sys"
-version = "210.0.0"
+version = "220.0.2"
 authors = ["McCoy R. Becker", "Yota Toyama", "Edgar Luque", "Austin J. Adams"]
-keywords = ["mlir", "llvm"]
+keywords = ["llvm", "mlir"]
 categories = ["external-ffi-bindings"]
 edition = "2024"
 description = "Rust bindings to the Qwerty MLIR C API."
@@ -14,3 +14,6 @@ license-file = "LICENSE"
 [build-dependencies]
 bindgen = "0.72.1"
 cmake = "0.1.54"
+
+[features]
+no-version-check = []

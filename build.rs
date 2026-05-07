@@ -2,14 +2,19 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     error::Error,
-    fs::{File, read_dir},
+    fs::{self, File, read_dir},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Command, exit},
+    process::{Command, Stdio, exit},
+    ffi::OsStr,
     str,
 };
 
-const LLVM_MAJOR_VERSION: usize = 21;
+/// Logical name passed to bindgen for the in-memory wrapper. Bindgen needs a
+/// `header_name` for diagnostics; this string never touches disk.
+const WRAPPER_NAME: &str = "wrapper.h";
+
+const LLVM_MAJOR_VERSION: usize = 22;
 
 fn main() {
     if let Err(error) = run() {
@@ -139,16 +144,21 @@ fn build_qwerty_mlir() -> BuiltQwertyMlir {
 }
 
 fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>> {
-    let version = llvm_config("--version")?;
+    println!("cargo:rerun-if-changed=build.rs");
+    let link_mode = detect_link_mode();
 
-    if !version.starts_with(&format!("{LLVM_MAJOR_VERSION}.",)) {
-        return Err(format!(
-            "failed to find correct version ({LLVM_MAJOR_VERSION}.x.x) of llvm-config (found {version})"
-        )
-        .into());
+    if !cfg!(feature = "no-version-check") {
+        let version = llvm_config("--version", &link_mode)?;
+        if !version.starts_with(&format!("{LLVM_MAJOR_VERSION}.")) {
+            return Err(format!(
+                "failed to find correct version ({LLVM_MAJOR_VERSION}.x.x) of llvm-config (found {version})"
+            )
+            .into());
+        }
     }
 
-    println!("cargo:rerun-if-changed=wrapper.h");
+    let directory = llvm_config("--libdir", &link_mode)?;
+    println!("cargo:rustc-link-search={directory}");
 
     println!(
         "cargo:rustc-link-search={}",
@@ -172,14 +182,51 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
         }
     }
 
-    for name in llvm_config("--libnames")?.trim().split(' ') {
-        if let Some(name) = parse_archive_name(name) {
-            println!("cargo:rustc-link-lib={name}");
+    match link_mode {
+        LinkMode::Static => {
+            for entry in fs::read_dir(&directory)? {
+                if let Some(name) = entry?.path().file_name().and_then(OsStr::to_str)
+                    && name.starts_with("libMLIR")
+                    && let Some(name) = parse_static_lib_name(name)
+                {
+                    println!("cargo:rustc-link-lib=static={name}");
+                }
+            }
+        }
+        LinkMode::Shared => {
+            // With shared LLVM, MLIR is a single shared library.
+            println!("cargo:rustc-link-lib=MLIR");
+            // The C API is in a separate shared library.
+            println!("cargo:rustc-link-lib=MLIR-C");
         }
     }
 
-    for flag in llvm_config("--system-libs")?.trim().split(' ') {
-        let flag = flag.trim_start_matches("-l");
+    for name in llvm_config("--libnames", &link_mode)?.split(' ') {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        match link_mode {
+            LinkMode::Static => {
+                if let Some(name) = parse_static_lib_name(name) {
+                    println!("cargo:rustc-link-lib={name}");
+                }
+            }
+            LinkMode::Shared => {
+                if let Some(name) = parse_shared_lib_name(name) {
+                    println!("cargo:rustc-link-lib={name}");
+                }
+            }
+        }
+    }
+
+    for flag in llvm_config("--system-libs", &link_mode)?.split(' ') {
+        let flag = flag.trim().trim_start_matches("-l");
+
+        if flag.is_empty() {
+            continue;
+        }
 
         if flag.starts_with('/') {
             // llvm-config returns absolute paths for dynamically linked libraries.
@@ -206,10 +253,13 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
         println!("cargo:rustc-link-lib={name}");
     }
 
+    let include_dir = llvm_config("--includedir", &link_mode)?;
+    let wrapper_contents = generate_wrapper_contents(&include_dir)?;
+
     bindgen::builder()
-        .header("wrapper.h")
+        .header_contents(WRAPPER_NAME, &wrapper_contents)
         .clang_args(vec![
-            format!("-I{}", llvm_config("--includedir")?),
+            format!("-I{include_dir}"),
             format!("-I{}", built_qwerty_mlir.include_dir.display()),
         ])
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -245,44 +295,99 @@ fn lib_names_starting_with<P: AsRef<Path>>(dir: P, prefix: &str) -> Vec<String> 
     lib_paths
 }
 
+#[derive(Clone, Copy)]
+enum LinkMode {
+    Static,
+    Shared,
+}
+
+/// Detect whether to link LLVM/MLIR statically or as shared libraries.
+///
+/// Checks in order:
+/// 1. `MLIR_SYS_LINK_SHARED=1` env var forces shared
+/// 2. Whether static libraries exist in the lib directory
+/// 3. Falls back to `llvm-config --shared-mode`
+fn detect_link_mode() -> LinkMode {
+    if let Ok(val) = env::var("MLIR_SYS_LINK_SHARED")
+        && val == "1"
+    {
+        return LinkMode::Shared;
+    }
+
+    // Try static first — use --libnames which actually checks for libraries.
+    if try_llvm_config("--libnames", "--link-static").is_ok() {
+        return LinkMode::Static;
+    }
+
+    // Static failed, try shared.
+    if try_llvm_config("--libnames", "--link-shared").is_ok() {
+        return LinkMode::Shared;
+    }
+
+    // Default to static (will produce a clear error later).
+    LinkMode::Static
+}
+
 fn get_system_libcpp() -> Option<&'static str> {
-    if cfg!(target_env = "msvc") {
+    if env::var("CARGO_CFG_TARGET_ENV").ok()? == "msvc" {
         None
-    } else if cfg!(target_os = "macos") {
+    } else if env::var("CARGO_CFG_TARGET_VENDOR").ok()? == "apple" {
         Some("c++")
     } else {
         Some("stdc++")
     }
 }
 
-fn llvm_config(argument: &str) -> Result<String, Box<dyn Error>> {
-    let prefix = env::var(format!("MLIR_SYS_{LLVM_MAJOR_VERSION}0_PREFIX"))
+fn llvm_config_command() -> Command {
+    let prefix = env::var_os(format!("MLIR_SYS_{LLVM_MAJOR_VERSION}0_PREFIX"))
         .map(|path| Path::new(&path).join("bin"))
         .unwrap_or_default();
-    let llvm_config_exe = if cfg!(target_os = "windows") {
+
+    Command::new(prefix.join(if cfg!(target_os = "windows") {
         "llvm-config.exe"
     } else {
         "llvm-config"
-    };
-
-    let call = format!(
-        "{} --link-static {argument}",
-        prefix.join(llvm_config_exe).display(),
-    );
-
-    Ok(str::from_utf8(
-        &if cfg!(target_os = "windows") {
-            Command::new("cmd").args(["/C", &call]).output()?
-        } else {
-            Command::new("sh").arg("-c").arg(&call).output()?
-        }
-        .stdout,
-    )?
-    .trim()
-    .to_string())
+    }))
 }
 
-fn parse_archive_name(name: &str) -> Option<&str> {
+fn try_llvm_config(argument: &str, link_flag: &str) -> Result<String, Box<dyn Error>> {
+    let mut command = llvm_config_command();
+    command.arg(link_flag).arg(argument).stderr(Stdio::null());
+    run_command(command)
+}
+
+fn llvm_config(argument: &str, link_mode: &LinkMode) -> Result<String, Box<dyn Error>> {
+    let mut command = llvm_config_command();
+
+    let link_flag = match link_mode {
+        LinkMode::Static => "--link-static",
+        LinkMode::Shared => "--link-shared",
+    };
+
+    command.arg(link_flag);
+
+    // --ignore-libllvm only applies to static linking.
+    if matches!(link_mode, LinkMode::Static) {
+        command.arg("--ignore-libllvm");
+    }
+
+    command.arg(argument).stderr(Stdio::inherit());
+    run_command(command)
+}
+
+fn run_command(mut command: Command) -> Result<String, Box<dyn Error>> {
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run `{command:?}`: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!("failed to run `{command:?}`: {}", output.status).into());
+    }
+
+    Ok(str::from_utf8(&output.stdout)?.trim().into())
+}
+
+fn parse_static_lib_name(name: &str) -> Option<&str> {
     if let Some(name) = name.strip_prefix("lib") {
         name.strip_suffix(".a")
     } else {
@@ -324,4 +429,60 @@ fn toposort(graph: &HashMap<String, Vec<String>>) -> Vec<String> {
     }
 
     sorted
+}
+
+fn parse_shared_lib_name(name: &str) -> Option<&str> {
+    let name = name.strip_prefix("lib").unwrap_or(name);
+
+    // Handle libFoo.so, libFoo.so.22, libFoo.dylib
+    if let Some(pos) = name.find(".so") {
+        Some(&name[..pos])
+    } else if let Some(name) = name.strip_suffix(".dylib") {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Walk `{includedir}/mlir-c/` and build an in-memory list of `#include`s
+/// covering every header. Returned as a `String` so it can be passed to
+/// bindgen via `header_contents`, avoiding any on-disk wrapper file. A
+/// disk-backed wrapper would have its mtime rewritten on every build,
+/// which interacts badly with bindgen's `CargoCallbacks::rerun-if-changed`
+/// tracking and forces cargo to rebuild this crate (and everything that
+/// depends on it) on every invocation.
+fn generate_wrapper_contents(include_dir: &str) -> Result<String, Box<dyn Error>> {
+    let mlir_c_dir = Path::new(include_dir).join("mlir-c");
+    let mut headers = Vec::new();
+    collect_headers(&mlir_c_dir, &mlir_c_dir, &mut headers)?;
+    headers.sort();
+
+    let mut content = String::new();
+    for header in &headers {
+        content.push_str(&format!("#include <mlir-c/{header}>\n"));
+    }
+    Ok(content)
+}
+
+fn collect_headers(
+    base: &Path,
+    dir: &Path,
+    headers: &mut Vec<String>,
+) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Skip Bindings/ (Python bindings, not relevant for Rust FFI)
+            if path.file_name().and_then(OsStr::to_str) == Some("Bindings") {
+                continue;
+            }
+            collect_headers(base, &path, headers)?;
+        } else if path.extension().and_then(OsStr::to_str) == Some("h") {
+            let relative = path.strip_prefix(base)?;
+            headers.push(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
 }
