@@ -2,11 +2,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     error::Error,
+    ffi::OsStr,
     fs::{self, File, read_dir},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio, exit},
-    ffi::OsStr,
     str,
 };
 
@@ -171,10 +171,11 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
     let directory = llvm_config("--libdir", &link_mode)?;
     println!("cargo:rustc-link-search={directory}");
 
-    let mlir_lib_names: HashSet<_> = lib_names_starting_with(llvm_config("--libdir", &link_mode)?, "libMLIR")
-        .iter()
-        .filter_map(|s| parse_static_lib_name(s).map(str::to_string))
-        .collect();
+    let mlir_lib_names: HashSet<_> =
+        lib_names_starting_with(llvm_config("--libdir", &link_mode)?, "libMLIR")
+            .iter()
+            .filter_map(|s| parse_static_lib_name(s).map(str::to_string))
+            .collect();
     for mlir_lib_name in toposort(&built_qwerty_mlir.mlir_deps_graph) {
         if mlir_lib_names.contains(&mlir_lib_name) {
             println!("cargo:rustc-link-lib=static={mlir_lib_name}");
@@ -432,7 +433,10 @@ fn parse_shared_lib_name(name: &str) -> Option<&str> {
 /// which interacts badly with bindgen's `CargoCallbacks::rerun-if-changed`
 /// tracking and forces cargo to rebuild this crate (and everything that
 /// depends on it) on every invocation.
-fn generate_wrapper_contents(include_dir: &str, qwerty_include_dir: &str) -> Result<String, Box<dyn Error>> {
+fn generate_wrapper_contents(
+    include_dir: &str,
+    qwerty_include_dir: &str,
+) -> Result<String, Box<dyn Error>> {
     let mlir_c_dir = Path::new(include_dir).join("mlir-c");
     let mut headers = Vec::new();
     collect_headers(&mlir_c_dir, &mlir_c_dir, &mut headers)?;
