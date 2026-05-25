@@ -237,13 +237,18 @@ fn run_bindgen(built_qwerty_mlir: BuiltQwertyMlir) -> Result<(), Box<dyn Error>>
     let include_dir = llvm_config("--includedir", &link_mode)?;
     let qwerty_include_dir = built_qwerty_mlir.include_dir.display().to_string();
     let wrapper_contents = generate_wrapper_contents(&include_dir, &qwerty_include_dir)?;
+    let clang_args = {
+        let mut args = vec![
+            format!("-I{include_dir}"),
+            format!("-I{qwerty_include_dir}"),
+        ];
+        fix_macos_sysroot(&mut args)?;
+        args
+    };
 
     bindgen::builder()
         .header_contents(WRAPPER_NAME, &wrapper_contents)
-        .clang_args(vec![
-            format!("-I{include_dir}"),
-            format!("-I{qwerty_include_dir}"),
-        ])
+        .clang_args(clang_args)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .unwrap()
@@ -355,6 +360,20 @@ fn llvm_config(argument: &str, link_mode: &LinkMode) -> Result<String, Box<dyn E
 
     command.arg(argument).stderr(Stdio::inherit());
     run_command(command)
+}
+
+/// Because of Apple's innovative approach to software engineering, our vanilla
+/// libclang does not know where the sysroot is, and thus #including trivial C
+/// standard library headers will fail during bindgen. We have to fix this
+/// manually.
+fn fix_macos_sysroot(clang_args: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
+    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+        let mut command = Command::new("xcrun");
+        command.args(["--show-sdk-path"]);
+        let sdk_path = run_command(command)?;
+        clang_args.push(format!("--sysroot={sdk_path}"));
+    }
+    Ok(())
 }
 
 fn run_command(mut command: Command) -> Result<String, Box<dyn Error>> {
